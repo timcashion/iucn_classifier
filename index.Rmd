@@ -1,0 +1,642 @@
+---
+title: "Classification of IUCN Red List Species"
+author: "Tim Cashion"
+date: "19/07/2019"
+output: html_document
+---
+## Intro
+An analysis to aid in predicted classification and thus triage of IUCN Red List species currently 'Not Evalauted' or 'Data Deficient'. 
+
+After some review, I believe it is more important not to predict the exact species category, but to predict whether the species is likely to be 'Threatened' (e.g., Vulnerable, Endangered, or Critically Endangered), or of a lesser concern ('Not Threatened', i.e., Least Concern or Near Threatened). 
+
+ML Methods:
+Decision Tree, Random Forest, Naive Bayes, kNN
+I can attempt these with regression based on a linear-scoring method of the IUCN status (0-1), or on a more classical classificaiton on the threat categories, or large over-arching categories (Not Threatened vs. Threatened). 
+
+Data sourecs:
+IUCN API - Current Threat Status, taxonomy, max depth, habitat type, threats, etc. 
+Fishbase - Length Data, Price category, Vulnerability Index, habitat range? Age at sexual maturity? Max Age? 
+Aquamaps - Area size (sum of cell area where occurence is predicted)
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo =TRUE)
+ipak <- function(pkg){
+  new.pkg <- pkg[!(pkg %in% installed.packages()[, "Package"])]
+  if (length(new.pkg)) 
+    install.packages(new.pkg, dependencies = TRUE)
+  sapply(pkg, require, character.only = TRUE)
+}
+
+
+packages <- c("tidyverse", 
+              # "maptools", 
+              "rgdal",
+              # "sf", 
+              "wesanderson",
+              # "sp",
+              # "raster"
+              "parallel",
+              "bookdown",
+              "knitr"
+              )
+ipak(packages)
+
+dir_data <- "../data"
+dir_spatial <- "../spatial"
+dir_spatial_csvs <- "../spatial/csvs"
+dir_rasters <- "../spatial/spp_rasters"
+dir_output <- "../output"
+dir_figs <- "../figs"
+
+set.seed(42)
+```
+
+```{r plot-aes}
+pal <- wes_palette(name = "Zissou1", n=100, type = c("continuous"))
+zissou5 <- wes_palette(name="Zissou1")
+theme_set(theme_classic())
+null_colour <- "white"
+
+```
+
+## Data
+```{r data-read}
+
+#Establish list of marine species (using O'Hara's at present)
+marine_species <- read.csv(file.path(dir_data, "spp_marine_from_api_2018-1.csv")) %>% filter(is.na(habs)==F)
+
+marine_species <- marine_species %>% separate(habs, into=paste("habs", seq(1,50), sep=""), sep=",") 
+marine_species <- marine_species %>% 
+  gather(key="habitat_num", value="value", -iucn_sid,-max_depth) %>% 
+  mutate(habitat_type=as.factor(value)) %>% 
+  dplyr::select(-c(habitat_num, value)) 
+marine_species <- marine_species %>% filter(is.na(habitat_type)==F)
+marine_species <- marine_species %>% 
+  mutate(habitat_group = gsub(habitat_type, pattern="\\..*", replacement="")) %>% 
+  mutate(habitat_group = as.factor(trimws(habitat_group)))
+
+#### Align with threats and narrative text: ####
+species_threats <- read.csv(file.path(dir_data, "species_fishing_threats.csv"), stringsAsFactors = F)
+colnames(species_threats) <- gsub(colnames(species_threats), pattern="result\\.", replacement="")
+risk_codes <- read.csv(file.path(dir_data, "risk_code_lookup.csv"), stringsAsFactors = F)
+
+species_threats <- species_threats %>% left_join(risk_codes, by=c("category"="code"))
+species_threats <- species_threats %>%
+  dplyr::select(iucn_sid, class_name, scientific_name, code_current, cat_score) %>%
+  unique()
+
+# threatened_status <- c("VU", "CR", "EN")
+# species_threats <- species_threats %>% filter(code_current %in% threatened_status)
+text_threats <- read.csv(file.path(dir_data, "narrative_threats_output.csv")) %>% 
+  rename(iucn_sid=scientific_name)
+
+text_threats$trawlers <- ifelse(text_threats$bottom_trawl==1|text_threats$pelagic_trawl==1|text_threats$trawl_unspec==1, 1, NA)
+text_threats <- text_threats %>% 
+  gather(key="super_code", value="threat", -iucn_sid) %>% 
+  filter(is.nan(threat)==F) %>% 
+  filter(is.na(threat)==F) %>% 
+  mutate(super_code = gsub(super_code, pattern="_", replacement=" "))
+
+all_species <- read.csv(file.path(dir_data, "iucn_species_list.csv"))
+
+num_dd <- nrow(all_species %>% filter(result.category=="DD"))
+```
+
+## Exploring the Data
+
+`r toString(prettyNum(num_dd))` species are currently classified by the IUCN as Data Deficient (DD; see Figure \@ref(fig:iucn-species-plot)). This is a major challenge to conservation as data deficient species are not prioritized for conservation efforts, and many are likely at an elevated risk of extinction. 
+
+```{r iucn-species-plot, fig.cap ="IUCN Red List species by conservation status"}
+all_species <- all_species %>% left_join(risk_codes, by=c("result.category"="code"))
+all_species <- all_species  %>% mutate(code_current = fct_relevel(code_current, c("DD", "LC", "NT", "VU", "EN", "CR", "EX"))) 
+included_species <- all_species %>% filter(result.taxonid %in% species_threats$iucn_sid)
+all_species_plot <- ggplot(data=all_species, aes(x=code_current, fill=code_current)) +
+  geom_bar() + 
+  scale_fill_manual(values= IUCNpalette::iucn_palette(category="All", exclude="NE")) +
+  ylab("Number of species") + 
+  labs(fill="IUCN Category") + 
+  xlab("") + 
+  scale_y_continuous(expand=c(0,0)) + 
+  theme(legend.position = "none") + 
+  NULL 
+
+all_species_plot
+```
+
+Let's focus on those that are not threatened or great (Least Concern and Near Threatened) and those that are Threatened or worse (Vulnerable, Endangered, Critically Endangeerd, and Extinct). 
+
+```{r dichotomy-threatened}
+
+all_species <- all_species %>%
+  mutate(new_category = if_else(is.na(cat_score), "Data Deficient", 
+                                if_else(cat_score <=0.2, "Not Threatened", "Threatened"
+                                #if_else(cat_score >0.8, "Extinct", "Threatened") #Removed this as it probably doesn't add much 
+                                ))) %>% 
+  mutate(new_category = as.factor(new_category))
+all_species_plot <- ggplot(data=all_species, aes(x=new_category, fill=new_category)) +
+  geom_bar() + 
+  scale_fill_manual(values= c("grey50", zissou5[1], zissou5[5])) +
+  ylab("Number of species") + 
+  labs(fill="IUCN Category") + 
+  xlab("") + 
+  scale_y_continuous(expand=c(0,0)) + 
+  theme(legend.position = "none") + 
+  NULL 
+
+all_species_plot
+```
+
+
+Here we're going to take advantage of the rfishbase package to extract relevant predictors for fishes. This will limit our analysis to those species in both the IUCN red list and Fishbase. 
+
+Here I look at the possible columns of fishbase data and use some based on what I think may be good predictors of an elevated risk status. I then check some of these for how many of them are NAs as this data is less useful if I have to fill in a lot. 
+
+Longevity of the species is probably a good predictor but only available for ~2000 of the 34,000 species covered by Fishbase. I try to see if there is a clear relationship with Length that could be modelled but it doesn't seem like it. 
+```{r fishbase}
+ipak("rfishbase")
+fishbase_taxa <- load_taxa()
+#Variables of interest: Length, Vulnerability, CommonLength, PriceCateg, Importance
+x <- species(species_list = "Bolbometopon muricatum") #Used to find out which fields are important
+colnames(x)
+species_list_fb <- fishbase_taxa %>% pull(Species)
+fb_data <- species(species_list = species_list_fb, fields=c("Species", "Length", "Vulnerability", "CommonLength", "PriceCateg", "Importance", "LongevityWild", "BodyShapeI", "DepthRangeDeep", "DepthRangeComDeep"))
+# popgrowth("Oreochromis niloticus")
+# distribution("Oreochromis niloticus")
+
+nrow(fb_data %>% filter(is.na(DepthRangeDeep)))
+nrow(fb_data %>% filter(is.na(DepthRangeComDeep) & is.na(DepthRangeDeep)))
+
+fb_data %>% group_by(DepthRangeDeep) %>% 
+  summarize(n=n())
+
+#Is there a relationship between Length and Longevity? 
+fb_data %>% 
+  ggplot(aes(x=Length, y=LongevityWild)) +
+  geom_point()
+
+```
+
+Aquamaps has tons of data on distribution of aquatic species. Their database is accessible through their package which is then set-up as a sqlite database locally. I compare the taxa lists between aquamaps and the IUCN to find where they overlap as right now I only want to predict for species already included in the IUCN Red List. 
+Main predictor I am using here is range size (if a species occurs in a given cell (0.5 by 0.5 degree cell), then it is assumed to occupy the area of that cell). Species with larger ranges have more places they can be unaffected by human or other disturbances. 
+
+This data is really helpful but takes a long time to process so I set eval=F on this chunk. 
+
+```{r aquamaps, eval=F}
+library(aquamapsdata)
+library(purrr)
+download_db(force = TRUE) #DB is 1gb so takes a long time to do this download. 
+my_db <- aquamapsdata:::src_sqlite_aquamapsdata()
+
+library(DT)
+# for a db table, return a tibble with the columns and their data types
+ls_types <- function(table) {
+  res <- table %>% head %>% collect %>% lapply(type_sum) %>% unlist
+  colname <- names(res)
+  title <- as.character(table$ops$x)
+  tibble(table = title, col_name = colname, col_type = res, desc = NA)
+}
+# run the above function on all tables
+am_schema <- bind_rows(
+  my_db %>% tbl("nativemaps") %>% ls_types,
+  my_db %>% tbl("hcaf") %>% ls_types,
+  my_db %>% tbl("hspen") %>% ls_types,
+  my_db %>% tbl("occ") %>% ls_types,
+  my_db %>% tbl("taxa") %>% ls_types
+)
+#datatable(am_schema)
+
+#Get species list
+am_species <- my_db %>% tbl("taxa") %>% filter(is.na(iucn_code)==F) %>% collect %>% mutate(SciName = paste(Genus, Species)) %>% select(SciName, SPECIESID) 
+am_species <- am_species %>% filter(SciName %in% all_species$result.scientific_name)
+#Get maps for species in list
+am_species_maps <- my_db %>% tbl("nativemaps") %>% collect %>% filter(SpeciesID %in% am_species$SPECIESID) 
+#get reference for map cell ids:
+am_map <- my_db %>% tbl("hcaf") %>% collect %>% select(CsquareCode, CenterLat, CenterLong, CellArea)
+
+
+am_species_maps <- am_species_maps %>% left_join(am_map)
+
+am_species_maps %>% 
+  ggplot(aes(x=CenterLong, y=CenterLat, fill=probability)) + 
+  geom_tile()
+
+write_csv(am_species_maps, "./data/am_species_maps.csv")
+
+am_species_maps_area <- am_species_maps %>% 
+  group_by(SpeciesID) %>% 
+  summarize(CellArea = sum(CellArea)) %>% 
+  left_join(am_species, by=c("SpeciesID"="SPECIESID"))
+
+write_csv(am_species_maps_area, "./data/am_species_area.csv")
+
+```
+
+
+Combine the IUCN, Fishbase and Aquamaps data here and fill in NAs where possible and filter out observations with NAs when not possible. I also save the Data Deficient (DD) species for later as these are what I want to get to in the end.  
+```{r data-cleaning}
+am_species_maps_area <- read_csv( "../data/am_species_area.csv")
+
+all_species <- read.csv(file.path(dir_data, "iucn_species_list.csv"))
+risk_codes <- read.csv(file.path(dir_data, "risk_code_lookup.csv"), stringsAsFactors = F)
+risk_codes <- risk_codes %>% dplyr::select(code, code_current, cat_score) %>% distinct()
+dat <- all_species %>% 
+  left_join(risk_codes, by=c("result.category"="code")) %>% 
+  left_join(fb_data, by=c("result.scientific_name"="Species")) %>% 
+  left_join(am_species_maps_area, by=c("result.scientific_name"="SciName")) %>% 
+  left_join(marine_species, by=c("result.taxonid"="iucn_sid"))
+
+#Add in feature of larger categories. Might improve classifier performace:
+dat$new_category <- NA
+dat <- dat %>%
+  mutate(new_category = if_else(is.na(cat_score), "Data Deficient", 
+                                if_else(cat_score <=0.2, "Not Threatened", "Threatened"
+                                #if_else(cat_score >0.8, "Extinct", "Threatened") #Removed this as it probably doesn't add much 
+                                ))) %>% 
+  mutate(new_category = as.factor(new_category))
+
+
+dat_no_dd <- dat %>% filter(code_current != "DD")
+dat_no_dd <- dat_no_dd  %>% filter(is.na(max_depth)==F) %>% droplevels.data.frame()
+
+fish_dat <- dat_no_dd %>%
+  filter(is.na(Length)==F & is.na(cat_score)==F) %>% 
+  droplevels.data.frame()  %>% 
+  filter(is.na(CellArea)==F)
+
+#14963 fishes are found in FB and IUCN list
+
+#dat_no_dd %>% filter(is.na(habitat_type)) 
+
+#Separate out DD data
+dd <- dat %>% filter(code_current == "DD")
+fish_dat_dd <- dd %>% filter(is.na(Length)==F) %>% filter(is.na(max_depth)==F) #2220 fishes are found in FB and IUCN list and are Data Deficient
+
+```
+
+
+```{r fish-dat-cleaning}
+#
+# unique(fish_dat$PriceCateg)
+fish_dat$PriceCateg[is.na(fish_dat$PriceCateg)] <- "unknown"
+
+
+#Assume common length is a normal relationship to max length
+nrow(fish_dat %>% filter(is.na(Length)==T))
+length_model <- lm(CommonLength ~ Length, dat=fish_dat)
+fish_dat$CommonLengthPred <- NA
+fish_dat$CommonLengthPred <- predict(length_model, newdata=fish_dat)
+fish_dat$CommonLength[is.na(fish_dat$CommonLength)==T] <- fish_dat$CommonLengthPred[is.na(fish_dat$CommonLength)==T]
+
+
+summary(fish_dat %>% select(cat_score, Length, Vulnerability, CommonLength))
+fish_dat_numeric <- fish_dat %>% select(cat_score, Length, Vulnerability, CommonLength)
+
+cormat <- round(cor(fish_dat_numeric),2)
+cormat <- as.data.frame(cormat) 
+cormat$Var1 <- row.names(cormat)
+melted_cormat <- cormat %>% gather(key="Var2", value="value", -Var1)
+ggplot(data = melted_cormat, aes(x=Var1, y=Var2, fill=value)) + 
+  geom_tile()
+#Interestingly, vulnerabilty is a poorer predictor of cat_score than length. 
+
+
+#Descriptors: 
+#importance
+fish_dat %>% group_by(PriceCateg) %>% summarize(n=n())
+fish_dat %>% group_by(Importance) %>% summarize(n=n())
+
+fish_dat$Importance[is.na(fish_dat$Importance)] <- "unknown"
+
+
+fish_dat$BodyShapeI[is.na(fish_dat$BodyShapeI)] <- "other"
+fish_dat$BodyShapeI[fish_dat$BodyShapeI=="other (see remarks)"] <- "other"
+#Check for remaining NAs in important variables. 
+colSums(is.na(fish_dat))
+
+
+```
+
+
+I set up the train and test datasets that I can continue to come back to the clean versions. Some of the modelling I do later on needs the data in particular formats (factors, numerics, etc.) so I want to modify it for each analysis, but have a 'clean' version I can keep coming back to. 
+I use a 70% data partition train/test split here. 
+```{r split-data}
+train_raw <- sample_frac(fish_dat, size=0.7, replace=F)
+test_raw  <- fish_dat %>% filter(!result.taxonid %in% train$result.taxonid)
+```
+
+
+## Modeling
+### Linear Modeling
+Start with some linear and generalized linear models. Helps me see what variables are significant predictors. 
+
+
+```{r lm}
+
+train <- train_raw
+test <- test_raw
+
+fish1 <- lm(cat_score ~ Vulnerability + CommonLength + PriceCateg + Importance + Length + CellArea, data=train)
+summary(fish1)
+
+fish2 <- lm(cat_score ~ Vulnerability + CommonLength + PriceCateg + Importance + Length + max_depth + CellArea, data=train)
+summary(fish2)
+
+fish3 <- lm(cat_score ~ Vulnerability +  CommonLength + PriceCateg + Importance + Length + habitat_group + max_depth + CellArea, data=train)
+summary(fish3)
+
+fish1_pred <- predict(fish1, newdata = test)
+fish2_pred <- predict(fish2, newdata = test)
+fish3_pred <- predict(fish3, newdata = test)
+
+#Calculate the Mean Squared Prediction Error 
+mean((test$cat_score - fish1_pred) ^ 2)
+mean((test$cat_score - fish2_pred) ^ 2)
+mean((test$cat_score - fish3_pred) ^ 2)
+
+```
+Our LM models are performing quite well with MSPE lowering for each variable added. 
+Vulnerability, CellArea, and Length, are all performing well as predictors that are highly significant. 
+Different levels within the categorical variables are also performing well, such as commercial species and high value species. 
+
+### PCA
+Can PCA help us? Maybe less useful because of how many categorical variables we have:
+```{r pca}
+fish.pca <- prcomp(train %>% select(cat_score, Length, Vulnerability, CommonLength, CellArea), center = TRUE,scale. = TRUE)
+summary(fish.pca)
+
+#devtools::install_github("vqv/ggbiplot")
+library(ggbiplot)
+ggbiplot(fish.pca, alpha=0.3)
+
+pca_groups <- train %>% pull(code_current) %>% as.character()
+pca_groups <- train %>% pull(new_category) %>% as.character()
+
+#grid1 <- grid2 <- seq(0.05, 0.2, length=5)
+#ggbiplot(fish.pca, ellipse=TRUE, labels = pca_groups, groups=pca_groups)
+```
+
+
+### Decisions trees:
+```{r cart}
+ipak("rpart")
+ipak("rpart.plot")
+tree <- rpart(cat_score ~ Vulnerability +  PriceCateg + Importance + Length + habitat_group + CellArea, data=train, minbucket=50)
+prp(tree)
+tree.pred = predict(tree, newdata=test)
+tree.sse = sum((tree.pred - test$cat_score)^2)
+
+tree.sse
+
+
+ipak("pROC")
+tree.pred = predict(tree, newdata=test)
+
+#auc <- auc(test$cat_score, tree.pred)
+#plot(roc(test$cat_score, tree.pred))
+
+
+tree <- rpart(new_category ~ Vulnerability +  PriceCateg + Importance + Length + habitat_group + CellArea, data=train, minbucket=50)
+prp(tree)
+tree.pred = predict(tree, newdata=test)
+
+
+```
+
+Length and Vulnerability are key here. This might not be surprising based on previous research but is still helpful for categorizing our data. 
+
+
+
+### kNN
+A lazy learning algorithm. 
+```{r knn}
+train <- train_raw
+test <- test_raw
+
+train_labels <- train %>% pull(cat_score)
+test_labels <- test %>% pull(cat_score)
+train_knn <- train %>% select(Vulnerability, PriceCateg, Importance, Length, habitat_group)
+test_knn <- test %>% select(Vulnerability, PriceCateg, Importance, Length, habitat_group)
+
+lc_accuracy <- nrow(test %>% filter(code_current=="LC")) / nrow(test)
+
+#using class::knn 
+
+colSums(is.na(train_knn))
+colSums(is.na(test_knn))
+train_y <- train  %>% select(code_current)
+
+colnames(train_knn)
+colnames(test_knn)
+
+#Transform habitat groups,price categ and importance into dummy variables. 
+ipak("fastDummies")
+train_knn <- fastDummies::dummy_cols(train_knn, select_columns = c("PriceCateg", "Importance", "habitat_group"), remove_first_dummy = TRUE) %>% select(-c(PriceCateg, Importance, habitat_group))
+test_knn <- fastDummies::dummy_cols(test_knn, select_columns = c("PriceCateg", "Importance", "habitat_group"), remove_first_dummy = TRUE) %>% select(-c(PriceCateg, Importance, habitat_group))
+#test_knn$habitat_gorup_15 <- as.integer(0)
+dummy_cols <- colnames(train_knn)[grep(colnames(train_knn), pattern="_")]
+test_pred <- class::knn(train=train_knn, cl=train_labels, test=test_knn, k=15)
+knn_cv_model <- class::knn.cv(train=train_knn, cl=train_labels,  k=15)
+
+
+
+#fct_relevel(factor(test_labels), as.factor(1))
+
+test_labels <- as.factor(test_labels)
+levels(test_labels) <- c("0", "0.2", "0.4", "0.6", "0.8", "1")
+levels(test_pred) <- c("0", "0.2", "0.4", "0.6", "0.8", "1")
+levels(test_pred) == levels(test_labels)
+
+ipak("gmodels")
+gmodels::CrossTable(test_labels, test_pred)
+cm <- as.matrix(table(Actual = test_labels, Predicted = test_pred))
+accuracy <- sum(diag(cm))/length(train_labels)
+accuracy
+
+#Balanced accuracy= TPR + TNR /2, where TPR is true positive rate and TNR is true negative rte 
+#TPR = TP/P
+ipak("caret")
+
+table <- table(test_pred, test_labels)
+caret::confusionMatrix(test_pred, test_labels)
+
+```
+
+
+### Naive Bayes
+```{r fishy-bayes}
+
+train <- train_raw %>% select(Vulnerability, PriceCateg, Importance, Length, habitat_group, CellArea, cat_score, new_category)
+test <- test_raw %>% select(Vulnerability, PriceCateg, Importance, Length, habitat_group, CellArea, cat_score, new_category)
+
+#Fishy Bayes:
+ipak("e1071")
+NBclassfier=naiveBayes(factor(cat_score) ~ Vulnerability +  PriceCateg + Importance + Length + habitat_group + CellArea, data=train)
+print(NBclassfier)
+model <- NBclassfier
+printALL=function(model){
+  trainPred=predict(model, newdata = train)
+  trainTable=table(train$cat_score, trainPred)
+  testPred=predict(NBclassfier, newdata=test)
+  testTable=table(test$cat_score, testPred)
+  trainAcc=(trainTable[1,1]+trainTable[2,2]+trainTable[3,3])/sum(trainTable)
+  testAcc=(testTable[1,1]+testTable[2,2]+testTable[3,3])/sum(testTable)
+  message("Contingency Table for Training Data")
+  print(trainTable)
+  message("Contingency Table for Test Data")
+  print(testTable)
+  message("Accuracy")
+  print(round(cbind(trainAccuracy=trainAcc, testAccuracy=testAcc),3))
+}
+printALL(NBclassfier)
+
+ipak("naivebayes")
+
+newNBclassifier=naive_bayes(factor(cat_score) ~ Vulnerability +  PriceCateg + Importance + Length + habitat_group, usekernel=T, data=train, laplace = 1)
+printALL(newNBclassifier)
+
+
+
+train <- train_raw %>% select(Vulnerability, PriceCateg, Importance, Length, habitat_group, CellArea, new_category)
+test <- test_raw %>% select(Vulnerability, PriceCateg, Importance, Length, habitat_group, CellArea, new_category)
+
+newNBclassifier_category <- naive_bayes(new_category ~ Vulnerability +  PriceCateg + Importance + Length + habitat_group + CellArea, usekernel=T, data=train, laplace = 1)
+printALL=function(model){
+  trainPred=predict(model, newdata = train)
+  trainTable=table(train$new_category, trainPred)
+  testPred=predict(model, newdata=test)
+  testTable=table(test$new_category, testPred)
+  trainAcc=(trainTable[1,1]+trainTable[2,2])/sum(trainTable)
+  testAcc=(testTable[1,1]+testTable[2,2])/sum(testTable)
+  message("Contingency Table for Training Data")
+  print(trainTable)
+  message("Contingency Table for Test Data")
+  print(testTable)
+  message("Accuracy")
+  print(round(cbind(trainAccuracy=trainAcc, testAccuracy=testAcc),3))
+}
+printALL(newNBclassifier_category)
+
+# ipak("class")
+# ipak("DMwR")
+
+
+
+```
+
+
+### Random Forest
+
+```{r random-forest}
+ipak("randomForest")
+train <- train_raw
+test <- test_raw
+
+train <- train %>% 
+  mutate_if(is.character, as.factor)
+test <- test %>% 
+  mutate_if(is.character, as.factor)
+
+rand.reg <- randomForest(as.numeric(cat_score) ~ Vulnerability +  PriceCateg + Importance + Length + habitat_group + CellArea, data=train, na.action=na.omit)
+print(rand.reg)
+
+rand.reg.pred <- predict(rand.reg, newdata=test)
+# auc <- ModelMetrics::auc(as.numeric(test$cat_score), as.numeric(rand.reg.pred))
+# plot(roc(as.numeric(test$cat_score), rand.reg.pred))
+
+rand.class <- randomForest(as.factor(code_current) ~ Vulnerability +  PriceCateg + Importance + Length + habitat_group + CellArea, data=train, na.action=na.omit)
+print(rand.class)
+rand.class.pred <- predict(rand.class, newdata=test)
+# auc <- auc(test$code_current, rand.class.pred)
+# plot(roc(test$cat_score, rand.class.pred))
+
+# ipak("MLmetrics")
+# LogLoss(rand.class.pred,test$code_current)
+
+round(importance(rand.class), 2)
+
+#Now try with just the new_category which is what we're interested in. 
+rand.category <- randomForest(as.factor(new_category) ~ Vulnerability +  PriceCateg + Importance + Length + habitat_group + CellArea, data=train, na.action=na.omit)
+print(rand.category)
+rand.category.pred <- predict(rand.category, newdata=test)
+# auc <- auc(test$code_current, rand.class.pred)
+# plot(roc(test$cat_score, rand.class.pred))
+```
+
+
+## Model Performance Summaries
+Based on the above, we use the ____ model. It performed well on predicting the test data while not just giving us an answer (Least Concern/Not threatened) that would be right ~90% of the time. 
+
+```{r model-performance}
+
+```
+
+
+```{r model-choice}
+chosen_model <- rand.category
+
+```
+
+
+Real purpose of this is to better predict which species that are Data Deficient at present, may be most at risk. 
+```{r dd-data-assignment}
+
+fish_dat_dd$PriceCateg[is.na(fish_dat_dd$PriceCateg)] <- "unknown"
+
+
+#Assume common length is a normal relationship to max length
+nrow(fish_dat_dd %>% filter(is.na(Length)==T))
+nrow(fish_dat_dd %>% filter(is.na(CommonLength)==T))
+
+length_model <- lm(CommonLength ~ Length, dat=fish_dat_dd)
+fish_dat_dd$CommonLengthPred <- NA
+fish_dat_dd$CommonLengthPred <- predict(length_model, newdata=fish_dat_dd)
+fish_dat_dd$CommonLength[is.na(fish_dat_dd$CommonLength)==T] <- fish_dat_dd$CommonLengthPred[is.na(fish_dat_dd$CommonLength)==T]
+
+
+summary(fish_dat_dd %>% select(cat_score, Length, Vulnerability, CommonLength))
+
+
+#Descriptors: 
+#importance
+# fish_dat_dd %>% group_by(PriceCateg) %>% summarize(n=n())
+# fish_dat_dd %>% group_by(Importance) %>% summarize(n=n())
+
+fish_dat_dd$Importance[is.na(fish_dat_dd$Importance)] <- "unknown"
+
+#Check for remaining NAs in important variables. 
+colSums(is.na(fish_dat_dd))
+
+fish_dat_dd <- fish_dat_dd  %>% 
+  mutate_if(is.character, as.factor)
+
+dd_predictions <- predict(chosen_model, fish_dat_dd)
+plot(dd_predictions)
+
+
+fish_dat_dd$pred <- dd_predictions
+
+
+
+
+#IF we used cat_score then we can do this:
+if(is.numeric(fish_dat_dd$pred)){
+  hist(fish_dat_dd$pred)
+  min(fish_dat_dd$pred)
+  max(fish_dat_dd$pred)
+  #Classify manually:
+  fish_dat_dd <- fish_dat_dd %>% 
+    mutate(pred = if_else(pred ==1.0, "Extinct",
+                                   if_else(pred>=0.8, "Critically Endangered", 
+                                           if_else(pred>=0.8, "Critically Endangered", 
+                                           if_else(pred>=0.6, "Endangered", 
+                                           if_else(pred>=0.4, "Vulnerable", 
+                                           if_else(pred>=0.2, "Near Threatened", "Least Concern"
+                                                   )))))))
+
+}
+
+
+
+
+```
+
