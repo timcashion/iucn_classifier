@@ -5,15 +5,14 @@ date: "19/07/2019"
 output: html_document
 ---
 
-**Disclaimer: This analysis has not been peer-reviewed and is not meant to replace the process of species assessment and prioritization undertaken by the IUCN Red List.**
-
 ## Intro
 An analysis to aid in predicted classification and thus triage of IUCN Red List species currently 'Not Evalauted' or 'Data Deficient'. 
 
-Problem Description: 
-The rate of extinction at present is high above historical levels. Conservation has limited resources to allocate to both the assessment of species and their protection. The main international organization that evaluates the population status of species is the IUCN. They assess species into several categories of risk, and a category of 'Data Deficient' when there is not enough information to judge the risk status of a species. 
+After some review, I believe it is more important not to predict the exact species category, but to predict whether the species is likely to be 'Threatened' (e.g., Vulnerable, Endangered, or Critically Endangered), or of a lesser concern ('Not Threatened', i.e., Least Concern or Near Threatened). 
 
-![IUCN_Categories](../images/iucn_categories.png)
+ML Methods:
+Decision Tree, Random Forest, Naive Bayes, kNN
+I can attempt these with regression based on a linear-scoring method of the IUCN status (0-1), or on a more classical classificaiton on the threat categories, or large over-arching categories (Not Threatened vs. Threatened). 
 
 Data sources:  
 IUCN API - Current Threat Status, taxonomy, max depth, habitat type, threats, etc.   
@@ -23,18 +22,18 @@ www.fishbase.org
 Aquamaps - Area size (sum of cell area where occurence is predicted)  
 www.aquamaps.org 
 
+Problem Description: 
+The rate of extinction at present is high above historical levels. Conservation has limited resources to allocate to both the assessment of species and their protection. The main international organization that evaluates the population status of species is the IUCN. They assess species into several categories of risk, and a category of 'Data Deficient' when there is not enough information to judge the risk status of a species. 
+
+![IUCN_Categories](../images/iucn_categories.png)
+
+
 Proposed Solution: 
 To properly allocate resources for conservation we need to know which species are most threatened. Species classified as 'Data Deficient' could be of high concern (e.g., Threatened) or they could be of a low prioirty (Least Concern or Near Threatened). An improvement to this process would be to predict which species are most likely of high conservation concern within the Data Deficient category as well as of species not assessed by the IUCN at present. 
-
-After some review, I believe it is more important not to predict the exact species category, but to predict whether the species is likely to be 'Threatened' (e.g., Vulnerable, Endangered, or Critically Endangered), or of a lesser concern ('Not Threatened', i.e., Least Concern or Near Threatened). 
 
 Therefore, I am to train a machine learning or statistical model on available data that will predict the IUCN category or their general level of cosnervation concern of species currently listed as Data Deficient or species not currently included on the IUCN Red List. 
 
 Based on my current knowledge, I begin with a focus on aquatic species, and especially fishes. 
-
-ML Methods:
-Logarithmic regression, Decision Tree, Random Forest, Naive Bayes, kNN
-I can attempt these with regression based on a linear-scoring method of the IUCN status (0-1), or on a more classical classificaiton on the threat categories, or large over-arching categories (Not Threatened vs. Threatened). 
 
 
 ```{r setup, include=FALSE}
@@ -85,9 +84,8 @@ null_colour <- "white"
 ## Data
 ```{r data-read}
 
-#Establish list of marine species
-all_species <- read.csv(file.path(dir_data, "iucn_species_list_version_2019-2.csv"))
-marine_species <- read.csv(file.path(dir_data, "spp_marine_from_version_2019-2.csv")) %>% filter(is.na(habs)==F)
+#Establish list of marine species (using O'Hara's at present)
+marine_species <- read.csv(file.path(dir_data, "spp_marine_from_api_2018-1.csv")) %>% filter(is.na(habs)==F)
 
 marine_species <- marine_species %>% separate(habs, into=paste("habs", seq(1,50), sep=""), sep=",") 
 marine_species <- marine_species %>% 
@@ -111,7 +109,17 @@ species_threats <- species_threats %>%
 
 # threatened_status <- c("VU", "CR", "EN")
 # species_threats <- species_threats %>% filter(code_current %in% threatened_status)
-text_threats <- read.csv(file.path(dir_data, "narrative_threats_output_tidy.csv"))
+text_threats <- read.csv(file.path(dir_data, "narrative_threats_output.csv")) %>% 
+  rename(iucn_sid=scientific_name)
+
+text_threats$trawlers <- ifelse(text_threats$bottom_trawl==1|text_threats$pelagic_trawl==1|text_threats$trawl_unspec==1, 1, NA)
+text_threats <- text_threats %>% 
+  gather(key="super_code", value="threat", -iucn_sid) %>% 
+  filter(is.nan(threat)==F) %>% 
+  filter(is.na(threat)==F) %>% 
+  mutate(super_code = gsub(super_code, pattern="_", replacement=" "))
+
+all_species <- read.csv(file.path(dir_data, "iucn_species_list.csv"))
 
 num_dd <- nrow(all_species %>% filter(result.category=="DD"))
 ```
@@ -282,7 +290,7 @@ fish_dat_dd <- dd %>% filter(is.na(Length)==F) %>% filter(is.na(max_depth)==F) #
 
 ```
 
-Check to see how many of the variables I was looking at are missing in the databases I am using. I can fill in some based on physical relationships in these species but harder for other variables (e.g., price category). 
+
 ```{r fish-dat-cleaning}
 #
 # unique(fish_dat$PriceCateg)
@@ -337,12 +345,8 @@ test_raw  <- fish_dat %>% filter(!result.taxonid %in% train$result.taxonid)
 
 I am going to be doing several types of models, but I am going to focus on a binary classification for now. 
 Therefore, I'm going to use an F1-Score as my primary metric to compare between model types. 
-
-Looking back at our training data, we know the vast majority are of least concern or near threatened. THat means a model could be 'correct' around 90% of the time if we just guessed 'Not Threatened'. That is a very high percentage, but doesn't give us any new information. 
 ```{r}
 
-lc_accuracy <- nrow(test %>% filter(code_current=="LC")) / nrow(test)
-lc_accuracy
 
 ```
 
@@ -351,6 +355,55 @@ lc_accuracy
 ## Modeling
 ### Linear Modeling
 Start with some linear and generalized linear models. Helps me see what variables are significant predictors. 
+
+
+```{r lm}
+
+train <- train_raw
+test <- test_raw
+
+fish1 <- lm(cat_score ~ Vulnerability + CommonLength + PriceCateg + Importance + Length + CellArea, data=train)
+summary(fish1)
+
+fish2 <- lm(cat_score ~ Vulnerability + CommonLength + PriceCateg + Importance + Length + max_depth + CellArea, data=train)
+summary(fish2)
+
+fish3 <- lm(cat_score ~ Vulnerability +  CommonLength + PriceCateg + Importance + Length + habitat_group + max_depth + CellArea, data=train)
+summary(fish3)
+
+fish1_pred <- predict(fish1, newdata = test)
+fish2_pred <- predict(fish2, newdata = test)
+fish3_pred <- predict(fish3, newdata = test)
+
+#Calculate the Mean Squared Prediction Error 
+mean((test$cat_score - fish1_pred) ^ 2)
+mean((test$cat_score - fish2_pred) ^ 2)
+mean((test$cat_score - fish3_pred) ^ 2)
+
+
+models_list <- models_list %>% append(c(fish1, fish2, fish3))
+
+predictions <- fish1_logit_pred
+convert_to_new_category <- function(predictions){
+  if(is.numeric(predictions)){
+    predictions <- if_else(predictions >=0.50, "Threatened", "Not Threatened")
+    predictions <- as.factor(predictions)
+    levels(predictions) <- c("Not Threatened", "Threatened")
+    return(predictions)
+  }
+}
+
+fish1_logit_pred <- convert_to_new_category(fish1_logit_pred)
+
+predicted_values <- list("fish1" = fish1_logit_pred,
+                         "fish2")
+
+
+
+F1_scores <- lapply(predicted_values, F_meas, reference = as.factor(test$new_category))
+
+```
+
 
 ```{r lm-new_category}
 
@@ -419,6 +472,22 @@ pca_groups <- train %>% pull(new_category) %>% as.character()
 
 ### Decisions trees:
 ```{r cart}
+
+tree <- rpart(cat_score ~ Vulnerability +  PriceCateg + Importance + Length + habitat_group + CellArea, data=train, minbucket=50)
+prp(tree)
+tree.pred = predict(tree, newdata=test)
+tree.sse = sum((tree.pred - test$cat_score)^2)
+
+tree.sse
+
+
+
+tree.pred = predict(tree, newdata=test)
+
+#auc <- auc(test$cat_score, tree.pred)
+#plot(roc(test$cat_score, tree.pred))
+
+
 tree <- rpart(new_category ~ Vulnerability +  PriceCateg + Importance + Length + habitat_group + CellArea, data=train, minbucket=50)
 prp(tree)
 tree.pred = predict(tree, newdata=test)
@@ -442,22 +511,22 @@ Length and Vulnerability are key here. This might not be surprising based on pre
 
 ### kNN
 A lazy learning algorithm. 
-kNN uses points that are similar on the predictors to derive patterns in the data for its prediction. 
 ```{r knn}
 train <- train_raw
 test <- test_raw
 
-train_labels <- train %>% pull(new_category)
-test_labels <- test %>% pull(new_category)
+train_labels <- train %>% pull(cat_score)
+test_labels <- test %>% pull(cat_score)
 train_knn <- train %>% select(Vulnerability, PriceCateg, Importance, Length, habitat_group)
 test_knn <- test %>% select(Vulnerability, PriceCateg, Importance, Length, habitat_group)
 
+lc_accuracy <- nrow(test %>% filter(code_current=="LC")) / nrow(test)
 
 #using class::knn 
 
 colSums(is.na(train_knn))
 colSums(is.na(test_knn))
-train_y <- train  %>% select(new_category)
+train_y <- train  %>% select(code_current)
 
 colnames(train_knn)
 colnames(test_knn)
@@ -468,15 +537,20 @@ train_knn <- fastDummies::dummy_cols(train_knn, select_columns = c("PriceCateg",
 test_knn <- fastDummies::dummy_cols(test_knn, select_columns = c("PriceCateg", "Importance", "habitat_group"), remove_first_dummy = TRUE) %>% select(-c(PriceCateg, Importance, habitat_group))
 #test_knn$habitat_gorup_15 <- as.integer(0)
 dummy_cols <- colnames(train_knn)[grep(colnames(train_knn), pattern="_")]
+test_pred <- class::knn(train=train_knn, cl=train_labels, test=test_knn, k=15)
 knn_cv_model <- class::knn.cv(train=train_knn, cl=train_labels,  k=15)
+
+train_labels <- train %>% pull(new_category)
 knn_pred_category <- class::knn(train=train_knn, cl=train_labels, test=test_knn, k=15)
 
-#Add values to predicted values for later evaluation. 
 predicted_values <- predicted_values %>% append(list("knn_classifier"=knn_pred_category))
 
 #fct_relevel(factor(test_labels), as.factor(1))
 
 test_labels <- as.factor(test_labels)
+levels(test_labels) <- c("0", "0.2", "0.4", "0.6", "0.8", "1")
+levels(test_pred) <- c("0", "0.2", "0.4", "0.6", "0.8", "1")
+levels(test_pred) == levels(test_labels)
 
 ipak("gmodels")
 gmodels::CrossTable(test_labels, test_pred)
@@ -569,6 +643,12 @@ train <- train %>%
 test <- test %>% 
   mutate_if(is.character, as.factor)
 
+rand.reg <- randomForest(as.numeric(cat_score) ~ Vulnerability +  PriceCateg + Importance + Length + habitat_group + CellArea, data=train, na.action=na.omit)
+print(rand.reg)
+
+rand.reg.pred <- predict(rand.reg, newdata=test)
+# auc <- ModelMetrics::auc(as.numeric(test$cat_score), as.numeric(rand.reg.pred))
+# plot(roc(as.numeric(test$cat_score), rand.reg.pred))
 
 rand.class <- randomForest(as.factor(code_current) ~ Vulnerability +  PriceCateg + Importance + Length + habitat_group + CellArea, data=train, na.action=na.omit)
 print(rand.class)
@@ -595,7 +675,7 @@ predicted_values <- predicted_values %>% append(list("random_forest"=rand.catego
 
 
 ## Model Performance Summaries
-Based on the above, we use the random forest model. It performed well on predicting the test data while not just giving us an answer (Least Concern/Not threatened) that would be right ~90% of the time. 
+Based on the above, we use the ____ model. It performed well on predicting the test data while not just giving us an answer (Least Concern/Not threatened) that would be right ~90% of the time. 
 
 ```{r model-performance}
 
@@ -684,9 +764,6 @@ We attempt to apply our random forest model to the DD data. There are `r toStrin
 fish_dat_dd %>% ggplot(aes(x=pred, fill=pred)) +
   geom_bar() +
   xlab("Prediction Status") +
-  theme(legend.position = "none") +
-  scale_fill_manual(values=c("grey50" ,zissou5[1], zissou5[5]))
+  theme(legend.position = "none")
 ```
-
-
 
