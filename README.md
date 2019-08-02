@@ -9,8 +9,6 @@ An analysis to aid in predicted classification and thus triage of IUCN Red List 
 Problem Description: 
 The rate of extinction at present is high above historical levels. Conservation has limited resources to allocate to both the assessment of species and their protection. The main international organization that evaluates the population status of species is the IUCN. They assess species into several categories of risk, and a category of 'Data Deficient' when there is not enough information to judge the risk status of a species. 
 
-![IUCN_Categories](../images/iucn_categories.png)
-
 Data sources:  
 IUCN API - Current Threat Status, taxonomy, max depth, habitat type, threats, etc.   
 https://apiv3.iucnredlist.org/api/v3/docs
