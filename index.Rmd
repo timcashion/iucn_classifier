@@ -8,37 +8,37 @@ output: html_document
 **Disclaimer: This analysis has not been peer-reviewed and is not meant to replace the process of species assessment and prioritization undertaken by the IUCN Red List.**
 
 ## Intro
-An analysis to aid in predicted classification and thus triage of IUCN Red List species currently 'Not Evalauted' or 'Data Deficient'. 
+An analysis to aid in predicted classification and thus triage of IUCN Red List species currently 'Not Evaluated' or 'Data Deficient'. 
 
 Problem Description: 
 The rate of extinction at present is high above historical levels. Conservation has limited resources to allocate to both the assessment of species and their protection. The main international organization that evaluates the population status of species is the IUCN. They assess species into several categories of risk, and a category of 'Data Deficient' when there is not enough information to judge the risk status of a species. 
 
-![IUCN_Categories](../images/iucn_categories.png)
+![IUCN Categories. Source: IUCN, 2019](../images/iucn_categories.png)
 
 Data sources:  
 IUCN API - Current Threat Status, taxonomy, max depth, habitat type, threats, etc.   
 https://apiv3.iucnredlist.org/api/v3/docs
 Fishbase - Length Data, Price category, Vulnerability Index, habitat range? Age at sexual maturity? Max Age?   
 www.fishbase.org
-Aquamaps - Area size (sum of cell area where occurence is predicted)  
+Aquamaps - Area size (sum of cell area where occurrence is predicted)  
 www.aquamaps.org 
 
 Proposed Solution: 
-To properly allocate resources for conservation we need to know which species are most threatened. Species classified as 'Data Deficient' could be of high concern (e.g., Threatened) or they could be of a low prioirty (Least Concern or Near Threatened). An improvement to this process would be to predict which species are most likely of high conservation concern within the Data Deficient category as well as of species not assessed by the IUCN at present. 
+To properly allocate resources for conservation we need to know which species are most threatened. Species classified as 'Data Deficient' could be of high concern (e.g., Threatened) or they could be of a low priority (Least Concern or Near Threatened). An improvement to this process would be to predict which species are most likely of high conservation concern within the Data Deficient category as well as of species not assessed by the IUCN at present. 
 
 After some review, I believe it is more important not to predict the exact species category, but to predict whether the species is likely to be 'Threatened' (e.g., Vulnerable, Endangered, or Critically Endangered), or of a lesser concern ('Not Threatened', i.e., Least Concern or Near Threatened). 
 
-Therefore, I am to train a machine learning or statistical model on available data that will predict the IUCN category or their general level of cosnervation concern of species currently listed as Data Deficient or species not currently included on the IUCN Red List. 
+Therefore, I am to train a machine learning or statistical model on available data that will predict the IUCN category or their general level of conservation concern of species currently listed as Data Deficient or species not currently included on the IUCN Red List. 
 
 Based on my current knowledge, I begin with a focus on aquatic species, and especially fishes. 
 
 ML Methods:
 Logarithmic regression, Decision Tree, Random Forest, Naive Bayes, kNN
-I can attempt these with regression based on a linear-scoring method of the IUCN status (0-1), or on a more classical classificaiton on the threat categories, or large over-arching categories (Not Threatened vs. Threatened). 
+I can attempt these with regression based on a linear-scoring method of the IUCN status (0-1), or on a more classical classification on the threat categories, or large over-arching categories (Not Threatened vs. Threatened). 
 
 
 ```{r setup, include=FALSE}
-knitr::opts_chunk$set(echo =TRUE)
+knitr::opts_chunk$set(echo =TRUE, message=F, warning=F)
 ipak <- function(pkg){
   new.pkg <- pkg[!(pkg %in% installed.packages()[, "Package"])]
   if (length(new.pkg)) 
@@ -137,7 +137,7 @@ all_species_plot <- ggplot(data=all_species, aes(x=code_current, fill=code_curre
 all_species_plot
 ```
 
-Let's focus on those that are not threatened or great (Least Concern and Near Threatened) and those that are Threatened or worse (Vulnerable, Endangered, Critically Endangeerd, and Extinct). 
+Let's focus on those that are not threatened or great (Least Concern and Near Threatened) and those that are Threatened or worse (Vulnerable, Endangered, Critically Endangered, and Extinct). 
 
 ```{r dichotomy-threatened}
 
@@ -163,14 +163,14 @@ all_species_plot
 
 Here we're going to take advantage of the rfishbase package to extract relevant predictors for fishes. This will limit our analysis to those species in both the IUCN red list and Fishbase. 
 
-Here I look at the possible columns of fishbase data and use some based on what I think may be good predictors of an elevated risk status. I then check some of these for how many of them are NAs as this data is less useful if I have to fill in a lot. 
+Here I look at the possible columns of Fishbase data and use some based on what I think may be good predictors of an elevated risk status. I then check some of these for how many of them are NAs as this data is less useful if I have to fill in a lot. 
 
 Longevity of the species is probably a good predictor but only available for ~2000 of the 34,000 species covered by Fishbase. I try to see if there is a clear relationship with Length that could be modelled but it doesn't seem like it. 
 ```{r fishbase}
 fishbase_taxa <- load_taxa()
 #Variables of interest: Length, Vulnerability, CommonLength, PriceCateg, Importance
 x <- species(species_list = "Bolbometopon muricatum") #Used to find out which fields are important
-colnames(x)
+# colnames(x)
 species_list_fb <- fishbase_taxa %>% pull(Species)
 fb_data <- species(species_list = species_list_fb, fields=c("Species", "Length", "Vulnerability", "CommonLength", "PriceCateg", "Importance", "LongevityWild", "BodyShapeI", "DepthRangeDeep", "DepthRangeComDeep"))
 # popgrowth("Oreochromis niloticus")
@@ -306,7 +306,6 @@ cormat$Var1 <- row.names(cormat)
 melted_cormat <- cormat %>% gather(key="Var2", value="value", -Var1)
 ggplot(data = melted_cormat, aes(x=Var1, y=Var2, fill=value)) + 
   geom_tile()
-#Interestingly, vulnerabilty is a poorer predictor of cat_score than length. 
 
 
 #Descriptors: 
@@ -320,10 +319,11 @@ fish_dat$Importance[is.na(fish_dat$Importance)] <- "unknown"
 fish_dat$BodyShapeI[is.na(fish_dat$BodyShapeI)] <- "other"
 fish_dat$BodyShapeI[fish_dat$BodyShapeI=="other (see remarks)"] <- "other"
 #Check for remaining NAs in important variables. 
-colSums(is.na(fish_dat))
-
+#colSums(is.na(fish_dat))
 
 ```
+Interestingly, vulnerabilty is a poorer predictor of cat_score than length. 
+
 
 
 I set up the train and test datasets that I can continue to come back to the clean versions. Some of the modelling I do later on needs the data in particular formats (factors, numerics, etc.) so I want to modify it for each analysis, but have a 'clean' version I can keep coming back to. 
@@ -340,7 +340,7 @@ test <- test_raw
 I am going to be doing several types of models, but I am going to focus on a binary classification for now. 
 Therefore, I'm going to use an F1-Score as my primary metric to compare between model types. 
 
-Looking back at our training data, we know the vast majority are of least concern or near threatened. THat means a model could be 'correct' around 90% of the time if we just guessed 'Not Threatened'. That is a very high percentage, but doesn't give us any new information. 
+Looking back at our training data, we know the vast majority are of least concern or near threatened. That means a model could be 'correct' around 90% of the time if we just guessed 'Not Threatened'. That is a very high percentage, but doesn't give us any new information. 
 ```{r}
 
 lc_accuracy <- nrow(test %>% filter(code_current=="LC")) / nrow(test)
@@ -360,13 +360,13 @@ train <- train_raw
 test <- test_raw
 
 fish1 <- glm(new_category ~ Vulnerability + CommonLength + PriceCateg + Importance + Length + CellArea, data=train, family="binomial")
-summary(fish1)
+#summary(fish1)
 
 fish2 <- glm(new_category ~ Vulnerability + CommonLength + PriceCateg + Importance + Length + max_depth + CellArea, data=train, family="binomial")
-summary(fish2)
+#summary(fish2)
 
 fish3 <- glm(new_category ~ Vulnerability +  CommonLength + PriceCateg + Importance + Length + habitat_group + max_depth + CellArea, data=train, family="binomial")
-summary(fish3)
+#summary(fish3)
 
 fish1_pred <- predict(fish1, newdata = test)
 fish2_pred <- predict(fish2, newdata = test)
@@ -462,8 +462,8 @@ colSums(is.na(train_knn))
 colSums(is.na(test_knn))
 train_y <- train  %>% select(new_category)
 
-colnames(train_knn)
-colnames(test_knn)
+# colnames(train_knn)
+# colnames(test_knn)
 
 #Transform habitat groups,price categ and importance into dummy variables. 
 ipak("fastDummies")
@@ -520,10 +520,6 @@ printALL(newNBclassifier_category)
 nb_predictions=predict(newNBclassifier_category, newdata=test)
 
 predicted_values <- predicted_values %>% append(list("nb_classifier"=nb_predictions))
-
-# ipak("class")
-# ipak("DMwR")
-
 
 
 ```
@@ -590,8 +586,8 @@ fish_dat_dd$PriceCateg[is.na(fish_dat_dd$PriceCateg)] <- "unknown"
 
 
 #Assume common length is a normal relationship to max length
-nrow(fish_dat_dd %>% filter(is.na(Length)==T))
-nrow(fish_dat_dd %>% filter(is.na(CommonLength)==T))
+# nrow(fish_dat_dd %>% filter(is.na(Length)==T)) #0 rows don't have length,
+# nrow(fish_dat_dd %>% filter(is.na(CommonLength)==T)) #But 2250 don't have common length
 
 length_model <- lm(CommonLength ~ Length, dat=fish_dat_dd)
 fish_dat_dd$CommonLengthPred <- NA
@@ -599,7 +595,7 @@ fish_dat_dd$CommonLengthPred <- predict(length_model, newdata=fish_dat_dd)
 fish_dat_dd$CommonLength[is.na(fish_dat_dd$CommonLength)==T] <- fish_dat_dd$CommonLengthPred[is.na(fish_dat_dd$CommonLength)==T]
 
 
-summary(fish_dat_dd %>% select(cat_score, Length, Vulnerability, CommonLength))
+#summary(fish_dat_dd %>% select(cat_score, Length, Vulnerability, CommonLength))
 
 
 #Descriptors: 
@@ -625,33 +621,13 @@ num_dd_predicted_threatened <- length(dd_predictions[dd_predictions=="Threatened
 fish_dat_dd$pred <- as.character(dd_predictions)
 fish_dat_dd$pred[is.na(fish_dat_dd$pred)] <- "No Prediction"
 
-
-
-#IF we used cat_score then we can do this:
-if(is.numeric(fish_dat_dd$pred)){
-  hist(fish_dat_dd$pred)
-  min(fish_dat_dd$pred)
-  max(fish_dat_dd$pred)
-  #Classify manually:
-  fish_dat_dd <- fish_dat_dd %>% 
-    mutate(pred = if_else(pred ==1.0, "Extinct",
-                                   if_else(pred>=0.8, "Critically Endangered", 
-                                           if_else(pred>=0.8, "Critically Endangered", 
-                                           if_else(pred>=0.6, "Endangered", 
-                                           if_else(pred>=0.4, "Vulnerable", 
-                                           if_else(pred>=0.2, "Near Threatened", "Least Concern"
-                                                   )))))))
-
-}
-
-
 ```
 
 We attempt to apply our random forest model to the DD data. There are `r toString(num_dd)` DD species that we try this on, but due to NAs in some of our predictors we only prepare predictions for `r toString(num_dd_predicted)`. Out of these, only `r toString(num_dd_predicted_threatened)` are predicted to be threatened. While this seems low this is good news for two reasons:
 1. Less species are threatened in the DD category than we may have thought (Yay!). 
-2. 18 is a small number of species that could be re-assessed or prioritized for original research into their current population status. If we chose them at random (maye unlikely), we would likely waste a lot of time and effort re-assessing DD species that are likely "Least Concern". 
+2. 18 is a small number of species that could be re-assessed or prioritized for original research into their current population status. If we chose them at random (maybe unlikely), we would likely waste a lot of time and effort re-assessing DD species that are likely "Least Concern". 
 
-Do to missing data, we cannot predict for all species and are missing predictions for ~1000 species. Next step would be to impute these values where possible and re-run the prediction.
+Due to missing data, we cannot predict for all species and are missing predictions for ~1000 species. Next step would be to impute these values where possible and re-run the prediction.
 
 ```{r}
 fish_dat_dd %>% ggplot(aes(x=pred, fill=pred)) +
