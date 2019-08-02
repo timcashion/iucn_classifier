@@ -52,7 +52,7 @@ packages <- c("tidyverse",
               "knitr",
               "randomForest", 
               "rfishbase", 
-              "aquamapsdata",
+              #"aquamapsdata",
               "purrr",
               "DT",
               "rpart",
@@ -330,8 +330,10 @@ I set up the train and test datasets that I can continue to come back to the cle
 I use a 70% data partition train/test split here. 
 ```{r split-data}
 train_raw <- sample_frac(fish_dat, size=0.7, replace=F)
-test_raw  <- fish_dat %>% filter(!result.taxonid %in% train$result.taxonid)
+test_raw  <- fish_dat %>% filter(!result.taxonid %in% train_raw$result.taxonid)
 
+train <- train_raw
+test <- test_raw
 ```
 
 
@@ -343,7 +345,7 @@ Looking back at our training data, we know the vast majority are of least concer
 
 lc_accuracy <- nrow(test %>% filter(code_current=="LC")) / nrow(test)
 lc_accuracy
-
+models_list <- list()
 ```
 
 
@@ -405,8 +407,9 @@ Can PCA help us? Maybe less useful because of how many categorical variables we 
 fish.pca <- prcomp(train %>% select(cat_score, Length, Vulnerability, CommonLength, CellArea), center = TRUE,scale. = TRUE)
 summary(fish.pca)
 
-#devtools::install_github("vqv/ggbiplot")
-library(ggbiplot)
+devtools::install_github("vqv/ggbiplot")
+
+ipak("ggbiplot")
 ggbiplot(fish.pca, alpha=0.3)
 
 pca_groups <- train %>% pull(code_current) %>% as.character()
@@ -478,20 +481,13 @@ predicted_values <- predicted_values %>% append(list("knn_classifier"=knn_pred_c
 
 test_labels <- as.factor(test_labels)
 
-ipak("gmodels")
-gmodels::CrossTable(test_labels, test_pred)
-cm <- as.matrix(table(Actual = test_labels, Predicted = test_pred))
-accuracy <- sum(diag(cm))/length(train_labels)
-accuracy
-
-#Balanced accuracy= TPR + TNR /2, where TPR is true positive rate and TNR is true negative rte 
-#TPR = TP/P
-
-
-table <- table(test_pred, test_labels)
-caret::confusionMatrix(test_pred, test_labels)
+table <- table(knn_pred_category, test_labels)
+caret::confusionMatrix(knn_pred_category, test_labels)
 
 ```
+
+Balanced accuracy of kNN does not perform very well. Predicts 39 species are Not Threatened when they actually are.
+
 
 
 ### Naive Bayes
@@ -501,31 +497,6 @@ train <- train_raw %>% select(Vulnerability, PriceCateg, Importance, Length, hab
 test <- test_raw %>% select(Vulnerability, PriceCateg, Importance, Length, habitat_group, CellArea, cat_score, new_category)
 
 #Fishy Bayes:
-NBclassfier=naiveBayes(factor(cat_score) ~ Vulnerability +  PriceCateg + Importance + Length + habitat_group + CellArea, data=train)
-print(NBclassfier)
-model <- NBclassfier
-printALL=function(model){
-  trainPred=predict(model, newdata = train)
-  trainTable=table(train$cat_score, trainPred)
-  testPred=predict(NBclassfier, newdata=test)
-  testTable=table(test$cat_score, testPred)
-  trainAcc=(trainTable[1,1]+trainTable[2,2]+trainTable[3,3])/sum(trainTable)
-  testAcc=(testTable[1,1]+testTable[2,2]+testTable[3,3])/sum(testTable)
-  message("Contingency Table for Training Data")
-  print(trainTable)
-  message("Contingency Table for Test Data")
-  print(testTable)
-  message("Accuracy")
-  print(round(cbind(trainAccuracy=trainAcc, testAccuracy=testAcc),3))
-}
-printALL(NBclassfier)
-
-
-
-newNBclassifier=naive_bayes(factor(cat_score) ~ Vulnerability +  PriceCateg + Importance + Length + habitat_group, usekernel=T, data=train, laplace = 1)
-printALL(newNBclassifier)
-
-
 
 train <- train_raw %>% select(Vulnerability, PriceCateg, Importance, Length, habitat_group, CellArea, new_category)
 test <- test_raw %>% select(Vulnerability, PriceCateg, Importance, Length, habitat_group, CellArea, new_category)
@@ -680,12 +651,16 @@ We attempt to apply our random forest model to the DD data. There are `r toStrin
 1. Less species are threatened in the DD category than we may have thought (Yay!). 
 2. 18 is a small number of species that could be re-assessed or prioritized for original research into their current population status. If we chose them at random (maye unlikely), we would likely waste a lot of time and effort re-assessing DD species that are likely "Least Concern". 
 
+Do to missing data, we cannot predict for all species and are missing predictions for ~1000 species. Next step would be to impute these values where possible and re-run the prediction.
+
 ```{r}
 fish_dat_dd %>% ggplot(aes(x=pred, fill=pred)) +
   geom_bar() +
   xlab("Prediction Status") +
   theme(legend.position = "none") +
-  scale_fill_manual(values=c("grey50" ,zissou5[1], zissou5[5]))
+  labs(y="Number of species") + 
+  scale_fill_manual(values=c("grey50" ,zissou5[1], zissou5[5])) +
+  scale_y_continuous(expand=c(0,0))
 ```
 
 
